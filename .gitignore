@@ -10,3 +10,7 @@ venv/
 .ruff_cache/
 dist/
 build/
+
+# Gmail OAuth credentials/tokens - never commit
+credentials.json
+token.json
