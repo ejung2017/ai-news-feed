@@ -1,10 +1,10 @@
 # Setup requirements:
-# pip install google-auth-oauthlib google-auth-httplib2 google-api-python-client feedparser anthropic
+# pip install google-auth-oauthlib google-auth-httplib2 google-api-python-client feedparser google-genai
 
 import os
 import feedparser
 from datetime import datetime, timedelta, timezone
-from anthropic import Anthropic
+from google import genai
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -13,7 +13,8 @@ from email.mime.text import MIMEText
 import base64
 
 # Configuration
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "your_anthropic_api_key_here")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "your_gemini_api_key_here")
+GEMINI_MODEL = "gemini-2.5-flash"
 SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 
 # RSS Feeds to monitor
@@ -62,11 +63,11 @@ def fetch_recent_news():
                 })
     return news_items
 
-def synthesize_with_claude(news_items):
+def synthesize_with_gemini(news_items):
     if not news_items:
         return "<p>No new AI updates found in the past 24 hours.</p>"
 
-    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
     # Format raw data for prompt injection
     raw_data = ""
@@ -79,13 +80,11 @@ def synthesize_with_claude(news_items):
 
     Generate a clean, high-density HTML email briefing. Group the items logically (e.g., Core Models, Tools/Infrastructure, Industry Shifts). For each group, write a 2-sentence executive summary, followed by bulleted items. Each bullet must feature the exact title linked to its source URL, followed by a concise 1-sentence analytical takeaway. Cut all marketing fluff and focus strictly on engineering or architectural significance. Return ONLY the HTML code wrapped inside <body> tags."""
 
-    message = client.messages.create(
-        model="claude-3-5-sonnet-20241022",
-        max_tokens=2500,
-        temperature=0.2,
-        messages=[{"role": "user", "content": prompt}]
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
     )
-    return message.content[0].text
+    return response.text
 
 def send_email(service, html_content):
     user_profile = service.users().getProfile(userId='me').execute()
@@ -103,8 +102,8 @@ def send_email(service, html_content):
 if __name__ == "__main__":
     print("Fetching news...")
     raw_news = fetch_recent_news()
-    print(f"Found {len(raw_news)} recent articles. Synthesizing with Claude...")
-    digest_html = synthesize_with_claude(raw_news)
+    print(f"Found {len(raw_news)} recent articles. Synthesizing with Gemini...")
+    digest_html = synthesize_with_gemini(raw_news)
     print("Connecting to Gmail API...")
     gmail_client = get_gmail_service()
     send_email(gmail_client, digest_html)

@@ -5,7 +5,7 @@ description = "Aggregates and surfaces AI news"
 requires-python = ">=3.10"
 dependencies = [
     "feedparser",
-    "anthropic",
+    "google-genai",
     "google-auth-oauthlib",
     "google-auth-httplib2",
     "google-api-python-client",
