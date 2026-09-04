@@ -18,17 +18,18 @@ FEEDS = {
     "Hacker News (AI)": "https://hnrss.org/newest?q=AI"
 }
 
-# 며칠 치 뉴스를 모을지. "오늘 날짜"로만 거르면 UTC 기준 새벽에는
-# 어느 피드에도 오늘 자 글이 없어서 결과가 통째로 비어버립니다.
+# How far back to collect news. Filtering on "today's date" alone leaves the
+# result completely empty in the early UTC hours, when no feed has posted yet.
 LOOKBACK_HOURS = 48
 
 GEMINI_MODEL = "gemini-3.6-flash"
-# 기사 본문 요약이 너무 길면 프롬프트만 커지고 요약 품질은 안 좋아져서 잘라 씁니다.
+# Overly long article summaries only bloat the prompt and hurt summary quality,
+# so they get truncated.
 MAX_SUMMARY_CHARS = 600
 
 
 def _strip_html(raw):
-    """RSS summary 안에 섞여 있는 태그를 걷어내고 순수 텍스트만 남깁니다."""
+    """Strip the tags mixed into an RSS summary and keep only plain text."""
     text = re.sub(r"<[^>]+>", " ", raw or "")
     text = html.unescape(text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -36,7 +37,7 @@ def _strip_html(raw):
 
 
 def fetch_recent_news():
-    """최근 LOOKBACK_HOURS 시간 내 기사를 모아 (기사목록, 실패한피드목록)으로 돌려줍니다."""
+    """Collect articles from the last LOOKBACK_HOURS as (items, failed_feeds)."""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=LOOKBACK_HOURS)
 
     items = []
@@ -44,15 +45,17 @@ def fetch_recent_news():
     for feed_name, feed_url in FEEDS.items():
         feed = feedparser.parse(feed_url)
 
-        # 피드 자체를 못 가져온 경우(404, 502, XML 깨짐 등)를 조용히 넘기지 않고 알려줍니다.
+        # Report feeds that could not be fetched at all (404, 502, broken XML,
+        # etc.) instead of skipping them silently.
         status = getattr(feed, "status", None)
         if (status is not None and status >= 400) or not feed.entries:
-            reason = f"HTTP {status}" if status else (str(getattr(feed, "bozo_exception", "")) or "빈 피드")
+            reason = f"HTTP {status}" if status else (str(getattr(feed, "bozo_exception", "")) or "empty feed")
             problems.append(f"{feed_name} ({reason})")
             continue
 
         for entry in feed.entries:
-            # published_parsed가 없는 항목도 있어서 updated_parsed로 대체하고, 둘 다 없으면 건너뜁니다.
+            # Some entries have no published_parsed, so fall back to
+            # updated_parsed and skip the entry when neither is present.
             parsed = entry.get("published_parsed") or entry.get("updated_parsed")
             if not parsed:
                 continue
@@ -69,12 +72,13 @@ def fetch_recent_news():
 
 
 def summarize_with_gemini(items):
-    """Gemini에게 기사들을 넘겨 (제목, HTML본문)을 받아옵니다.
+    """Hand the articles to Gemini and get back (subject, html_body).
 
-    제목은 고정 문구가 아니라 그날 가장 많이 다뤄진 주제에서 뽑아냅니다.
+    The subject is drawn from the day's most-covered topic rather than a fixed
+    phrase.
     """
     if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY 환경 변수가 설정되어 있지 않습니다.")
+        raise RuntimeError("The GEMINI_API_KEY environment variable is not set.")
 
     client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -84,25 +88,25 @@ def summarize_with_gemini(items):
     )
     today = datetime.now().strftime("%Y-%m-%d")
 
-    prompt = f"""당신은 AI 업계를 추적하는 전문 애널리스트입니다.
-아래는 최근 {LOOKBACK_HOURS}시간 동안 수집된 RSS 기사 원문 목록입니다.
+    prompt = f"""You are an expert analyst tracking the AI industry.
+Below is the raw list of RSS articles collected over the last {LOOKBACK_HOURS} hours.
 
 {raw_data}
 
-다음 두 가지를 생성하세요.
+Produce the following two things.
 
-1) subject: 오늘 메일의 제목.
-   - 기사 전체를 훑어 **가장 많이 반복되거나 가장 파급력이 큰 단 하나의 주제**를 골라 그 주제를 제목에 담으세요.
-   - "오늘의 AI 뉴스" 같은 뻔한 문구는 금지. 그날 실제로 무슨 일이 있었는지 제목만 봐도 알 수 있어야 합니다.
-   - 형식: "📢 [AI 비서] {today} · <오늘의 핵심 주제>"
-   - 한국어로, 전체 60자 이내.
+1) subject: the subject line for today's email.
+   - Scan all the articles and pick the **single most repeated or most consequential topic**, then put that topic in the subject.
+   - Generic phrases like "Today's AI News" are forbidden. The subject alone must convey what actually happened that day.
+   - Format: "📢 [AI Digest] {today} · <today's key topic>"
+   - Write in English, 60 characters or fewer in total.
 
-2) body_html: 메일 본문(HTML).
-   - 기사를 주제별로 묶으세요 (예: 모델/연구, 도구·인프라, 산업 동향).
-   - 각 그룹마다 2문장짜리 핵심 요약을 먼저 쓰고, 그 아래 항목을 불릿으로 나열하세요.
-   - 각 불릿은 기사 제목을 원문 URL로 링크한 <a> 태그로 시작하고, 이어서 한 문장짜리 분석 코멘트를 답니다.
-   - 마케팅성 미사여구는 걷어내고 기술적·전략적 의미에 집중하세요.
-   - 한국어로 작성하고, <body> 태그 안에 들어갈 HTML 조각만 반환하세요."""
+2) body_html: the email body (HTML).
+   - Group the articles by theme (e.g. Models/Research, Tools & Infrastructure, Industry Trends).
+   - For each group, lead with a two-sentence summary, then list the items as bullets below it.
+   - Each bullet starts with an <a> tag linking the article title to its source URL, followed by a one-sentence analytical comment.
+   - Cut the marketing fluff and focus on technical and strategic significance.
+   - Write in English, and return only the HTML fragment that goes inside the <body> tag."""
 
     response = client.models.generate_content(
         model=GEMINI_MODEL,
@@ -125,9 +129,9 @@ def summarize_with_gemini(items):
 
 
 def fallback_content(items):
-    """Gemini 호출이 실패해도 메일은 나가야 하니, 요약 없이 원본 목록만이라도 만듭니다."""
+    """The mail must go out even if the Gemini call fails, so build the raw list without summaries."""
     today = datetime.now().strftime("%Y-%m-%d")
-    subject = f"📢 [AI 비서] {today} · AI 뉴스 브리핑 (요약 실패)"
+    subject = f"📢 [AI Digest] {today} · AI news briefing (summary failed)"
 
     by_source = {}
     for i in items:
@@ -144,55 +148,49 @@ def send_gmail(subject, body_html):
     import smtplib
     from email.mime.multipart import MIMEMultipart
 
-    # 자격 증명은 환경 변수에서만 읽습니다. 소스에 하드코딩하면 공개 저장소로 새어 나갑니다.
+    # Credentials are read only from the environment. Hardcoding them in the
+    # source leaks them to the public repository.
     sender_email = os.environ["GMAIL_ADDRESS"]
     app_password = os.environ["GMAIL_APP_PASSWORD"]
     receiver_email = sender_email
 
-    # 2. 편지봉투(MIMEMultipart)를 만들고 주소와 제목을 적습니다.
     message = MIMEMultipart()
     message["From"] = sender_email
     message["To"] = receiver_email
     message["Subject"] = subject
 
-    # 편지지에 글을 적어(MIMEText) 편지봉투에 쏙 집어넣습니다.
     message.attach(MIMEText(body_html, "html", "utf-8"))
 
     try:
-        # 4. 구글 우체국의 문을 열고(주소: smtp.gmail.com, 포트번호: 587) 연결합니다.
         with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls() # 편지 내용을 스파이가 훔쳐보지 못하게 '암호화' 가방에 담는 과정입니다.
-
-            # 5. 내 아이디와 16자리 비밀 열쇠로 우체국 직원에게 로그인 인증을 받습니다.
+            server.starttls()  # Encrypt the connection before sending credentials.
             server.login(sender_email, app_password)
-
-            # 6. 준비된 편지봉투를 우체통에 쏙 집어넣어 발송합니다!
             server.sendmail(sender_email, receiver_email, message.as_string())
 
-        print("🎉 이메일이 성공적으로 발송되었습니다! 스마트폰 메일함을 확인해 보세요!")
+        print("🎉 Email sent successfully! Check your inbox.")
 
     except Exception as e:
-        print(f"메일 발송 중 오류가 발생했습니다: {e}")
+        print(f"An error occurred while sending the email: {e}")
 
 
 if __name__ == "__main__":
-    print("뉴스 수집 중...")
+    print("Collecting news...")
     items, problems = fetch_recent_news()
     if problems:
-        print("수집 실패한 피드:", ", ".join(problems))
+        print("Feeds that failed to fetch:", ", ".join(problems))
 
     if not items:
-        print(f"최근 {LOOKBACK_HOURS}시간 내 새로운 뉴스가 없어 메일을 보내지 않습니다.")
+        print(f"No new articles in the last {LOOKBACK_HOURS} hours, so no email will be sent.")
     else:
-        print(f"기사 {len(items)}건 수집. Gemini로 요약 중...")
+        print(f"Collected {len(items)} articles. Summarizing with Gemini...")
         try:
             subject, body_html = summarize_with_gemini(items)
         except Exception as e:
-            print(f"Gemini 요약 실패({e}). 원본 목록으로 대체합니다.")
+            print(f"Gemini summary failed ({e}). Falling back to the raw list.")
             subject, body_html = fallback_content(items)
 
         if problems:
-            body_html += "<hr><p style='color:#888;font-size:12px'>수집 실패한 피드: " + html.escape(", ".join(problems)) + "</p>"
+            body_html += "<hr><p style='color:#888;font-size:12px'>Feeds that failed to fetch: " + html.escape(", ".join(problems)) + "</p>"
 
-        print(f"제목: {subject}")
+        print(f"Subject: {subject}")
         send_gmail(subject, body_html)
